@@ -2,462 +2,226 @@
 
 from __future__ import annotations
 
-from typing import Any, Dict, Optional
-import re
 from dataclasses import dataclass
+from datetime import date
+from typing import Any, Dict, List, Optional, Protocol
 
 
-# ================================
-# 0. 설정값 / 키워드 모음 (여기만 나중에 튜닝해도 됨)
-# ================================
+# ─────────────────────────────────────────
+# 1. 입력 타입 프로토콜 (DiaryEntry/DiaryCreate 둘 다 지원)
+# ─────────────────────────────────────────
 
-NEGATIVE_WORDS = [
-    "불안", "초조", "우울", "슬픔", "서운", "실망", "후회",
-    "힘들", "힘들었", "지침", "지쳤", "무기력", "짜증", "걱정", "스트레스",
-]
-
-POSITIVE_WORDS = [
-    "행복", "행복했", "기뻤", "즐거웠", "좋았", "좋았다", "편안", "안정",
-    "설렜", "재밌었", "감사", "뿌듯",
-]
-
-STRONG_NEGATIVE_PATTERNS = [
-    "너무 힘들", "버티기 힘들", "더 이상", "한계", "폭발할 것 같",
-]
-
-STRONG_POSITIVE_PATTERNS = [
-    "정말 좋았", "완전 좋았", "완전 행복", "너무 좋았", "최고였",
-]
-
-EVENT_CONCRETE_HINTS = [
-    "오늘", "어제", "아침", "점심", "저녁", "퇴근", "출근", "회사", "집",
-    "학교", "카페", "친구", "가족", "상사", "회의", "발표", "만났", "갔다", "했다",
-]
-
-REASON_LOGIC_WORDS = [
-    "때문", "그래서", "왜냐하면", "덕분에", "결과적으로", "그래도",
-]
-
-INSIGHT_DEPTH_HINTS = [
-    "깨달", "알게 되었", "인식했", "돌아보", "패턴", "반복", "습관",
-    "다음에는", "다음엔", "앞으로는", "바꾸고 싶", "변화", "성장",
-]
-
-TOMORROW_ACTION_HINTS = [
-    "하겠다", "해보자", "해보려", "해야겠다", "하기", "10분", "30분",
-    "한 번", "한번", "정리", "연습", "적어보",
-]
-
-TOMORROW_VAGUE_ONLY = [
-    "열심히 살자", "잘해보자", "잘 살아보자", "괜찮아질 거야",
-]
+class DiaryLike(Protocol):
+    date: Optional[date]
+    emotion: Optional[str]
+    event: Optional[str]
+    reason: Optional[str]
+    insight: Optional[str]
+    tomorrow: Optional[str]
 
 
-# 모드 임계값들
-SLUMP_EMOTION_THRESHOLD = -0.4
-OVERLOAD_EMOTION_THRESHOLD = -0.3
-GROWTH_INSIGHT_THRESHOLD = 0.4
-GROWTH_TOMORROW_THRESHOLD = 0.3
-
-
-# ================================
-# 1. 내부에서 사용할 자료 구조
-# ================================
+# ─────────────────────────────────────────
+# 2. 모호성 판단 결과 데이터 구조
+# ─────────────────────────────────────────
 
 @dataclass
-class AnalysisScores:
-    emotion: float          # -1.0 ~ 1.0
-    event: float            # -1.0 ~ 1.0 (구체성 기준)
-    reason: float           # -1.0 ~ 1.0 (논리성 / 일관성)
-    insight: float          # -1.0 ~ 1.0 (깊이)
-    tomorrow: float         # -1.0 ~ 1.0 (실행가능성)
-    final: float            # -1.0 ~ 1.0 (종합 점수)
+class AmbiguityResult:
+    is_ambiguous: bool
+    score: float               # 0.0 ~ 1.0 (높을수록 모호)
+    reasons: List[str]
 
 
-# ================================
-# 2. 유틸 함수들
-# ================================
+# ─────────────────────────────────────────
+# 3. 모호성 판단 규칙
+#    (지금은 MVP 버전, 나중에 세밀하게 수정 가능)
+# ─────────────────────────────────────────
 
-def _normalize(text: Optional[str]) -> str:
-    if not text:
-        return ""
-    # 공백 정리
-    return re.sub(r"\s+", " ", text).strip()
+def _text_len(s: Optional[str]) -> int:
+    return len(s.strip()) if s else 0
 
 
-def _length_score(text: str) -> float:
-    """텍스트 길이에 따른 대략적인 정보량 점수 (0.0 ~ 1.0)"""
-    n = len(text)
-    if n == 0:
-        return 0.0
-    if n < 10:
-        return 0.2
-    if n < 30:
-        return 0.5
-    if n < 80:
-        return 0.8
-    return 1.0
+def detect_ambiguity(diary: DiaryLike) -> AmbiguityResult:
+    """
+    모호성 판단 규칙 (MVP 버전)
 
+    기준 (초안):
+    - 전체 글자 수가 너무 짧으면 모호
+    - 감정/사건/이유 중 비어있는 칸이 많으면 모호
+    - 인사이트/내일 한 문장이 모두 비어 있으면 '정리되지 않은 상태'
+    """
 
-def _contains_any(text: str, patterns: list[str]) -> bool:
-    return any(p in text for p in patterns)
+    reasons: List[str] = []
 
+    emotion_len = _text_len(diary.emotion)
+    event_len = _text_len(diary.event)
+    reason_len = _text_len(diary.reason)
+    insight_len = _text_len(diary.insight)
+    tomorrow_len = _text_len(diary.tomorrow)
 
-def _count_matches(text: str, patterns: list[str]) -> int:
-    return sum(1 for p in patterns if p in text)
+    total_len = emotion_len + event_len + reason_len + insight_len + tomorrow_len
 
+    # 1) 전체 길이 기준
+    if total_len < 20:
+        reasons.append("전체 내용이 20자 미만으로 매우 짧아요.")
 
-# ================================
-# 3. 각 레이어별 점수 계산
-# ================================
+    # 2) 핵심 층(감정/사건/이유) 비어있는 개수
+    core_empty = sum(
+        1 for v in [emotion_len, event_len, reason_len]
+        if v == 0
+    )
+    if core_empty >= 2:
+        reasons.append("감정·사건·이유 중 두 개 이상이 비어 있어요.")
 
-def _emotion_score(emotion: str) -> float:
-    """감정 레이어 점수 (-1.0 ~ 1.0)"""
-    t = _normalize(emotion)
+    # 3) 인사이트/내일 한 문장 미작성
+    if insight_len == 0 and tomorrow_len == 0:
+        reasons.append("인사이트와 내일의 한 문장이 모두 비어 있어요.")
 
-    # 기본 점수 0
+    # score 계산 (rules 기반 가중치 예시)
     score = 0.0
-
-    neg_count = _count_matches(t, NEGATIVE_WORDS)
-    pos_count = _count_matches(t, POSITIVE_WORDS)
-
-    score += pos_count * 0.2
-    score -= neg_count * 0.2
-
-    if _contains_any(t, STRONG_POSITIVE_PATTERNS):
+    if total_len < 20:
+        score += 0.5
+    if core_empty >= 2:
         score += 0.3
-    if _contains_any(t, STRONG_NEGATIVE_PATTERNS):
-        score -= 0.3
+    if insight_len == 0 and tomorrow_len == 0:
+        score += 0.2
 
-    # 클리핑
-    if score > 1.0:
-        score = 1.0
-    if score < -1.0:
-        score = -1.0
+    # 0.0 ~ 1.0 사이로 clamp
+    score = min(1.0, max(0.0, score))
 
-    # 아예 비어 있으면 아주 약한 중립
-    if len(t) == 0:
-        score = 0.0
+    is_ambiguous = score >= 0.5 or len(reasons) > 0
 
-    return score
-
-
-def _event_score(event: str) -> float:
-    """사건의 구체성 점수 (-1.0 ~ 1.0)"""
-    t = _normalize(event)
-    if not t:
-        return -0.2
-
-    words = t.split(" ")
-    base = _length_score(t)
-
-    concrete_hits = _count_matches(t, EVENT_CONCRETE_HINTS)
-    score = base - 0.2  # 기본값을 약간 낮게 시작
-    score += concrete_hits * 0.15
-
-    if len(words) < 3:
-        score -= 0.2  # 너무 짧으면 구체성 부족
-
-    if score > 1.0:
-        score = 1.0
-    if score < -1.0:
-        score = -1.0
-    return score
-
-
-def _reason_score(emotion: str, event: str, reason: str) -> float:
-    """이유의 논리성 / 일관성 점수 (-1.0 ~ 1.0)"""
-    t = _normalize(reason)
-    if not t:
-        return -0.2
-
-    base = _length_score(t)
-    score = base - 0.2
-
-    # 논리 접속어 있으면 플러스
-    if _contains_any(t, REASON_LOGIC_WORDS):
-        score += 0.3
-
-    # 감정과 이유의 톤이 완전히 반대면 감점
-    emo_score = _emotion_score(emotion)
-    if emo_score > 0.4 and _contains_any(t, NEGATIVE_WORDS):
-        score -= 0.3
-    if emo_score < -0.4 and _contains_any(t, POSITIVE_WORDS):
-        score -= 0.3
-
-    if score > 1.0:
-        score = 1.0
-    if score < -1.0:
-        score = -1.0
-    return score
-
-
-def _insight_score(reason: str, insight: str) -> float:
-    """인사이트 깊이 점수 (-1.0 ~ 1.0)"""
-    t = _normalize(reason + " " + insight)
-    if not t:
-        return -0.3
-
-    base = _length_score(t) - 0.2
-    depth_hits = _count_matches(t, INSIGHT_DEPTH_HINTS)
-
-    score = base + depth_hits * 0.2
-
-    if "모르겠" in t:
-        score -= 0.3
-
-    if score > 1.0:
-        score = 1.0
-    if score < -1.0:
-        score = -1.0
-    return score
-
-
-def _tomorrow_score(tomorrow: str) -> float:
-    """내일의 한 문장 실행 가능성 점수 (-1.0 ~ 1.0)"""
-    t = _normalize(tomorrow)
-    if not t:
-        return -0.2
-
-    base = _length_score(t) - 0.2
-    score = base
-
-    if _contains_any(t, TOMORROW_ACTION_HINTS):
-        score += 0.3
-
-    if _contains_any(t, TOMORROW_VAGUE_ONLY):
-        score -= 0.2
-
-    if score > 1.0:
-        score = 1.0
-    if score < -1.0:
-        score = -1.0
-    return score
-
-
-# ================================
-# 4. 모호성 판정
-# ================================
-
-def _is_ambiguous(emotion: str, event: str, reason: str, insight: str, tomorrow: str) -> bool:
-    all_text = _normalize(" ".join([emotion, event, reason, insight, tomorrow]))
-    if len(all_text) < 10:
-        return True
-
-    core_filled = sum(
-        1 for t in [emotion, event, reason] if t and len(t.strip()) >= 5
-    )
-    if core_filled == 0:
-        return True
-
-    return False
-
-
-# ================================
-# 5. 종합 분석 + 모드 판정
-# ================================
-
-def _compute_scores(
-    emotion: str, event: str, reason: str, insight: str, tomorrow: str
-) -> AnalysisScores:
-    emo = _emotion_score(emotion)
-    evt = _event_score(event)
-    rsn = _reason_score(emotion, event, reason)
-    ins = _insight_score(reason, insight)
-    tmr = _tomorrow_score(tomorrow)
-
-    final = (
-        emo * 0.25 +
-        evt * 0.20 +
-        rsn * 0.15 +
-        ins * 0.25 +
-        tmr * 0.15
-    )
-
-    # 클리핑
-    if final > 1.0:
-        final = 1.0
-    if final < -1.0:
-        final = -1.0
-
-    return AnalysisScores(
-        emotion=emo,
-        event=evt,
-        reason=rsn,
-        insight=ins,
-        tomorrow=tmr,
-        final=final,
+    return AmbiguityResult(
+        is_ambiguous=is_ambiguous,
+        score=score,
+        reasons=reasons,
     )
 
 
-def _classify_mode(scores: AnalysisScores, is_ambiguous: bool) -> Dict[str, str]:
-    if is_ambiguous:
-        return {
-            "mode": "ambiguous",
-            "label": "모호 모드",
-            "description": (
-                "지금의 마음을 아직 말로 다 풀어내기 어려운 상태일 수 있어요. "
-                "그럼에도 이렇게 한 줄이라도 남겨 둔 것이 이미 중요한 시작이에요."
-            ),
-        }
+# ─────────────────────────────────────────
+# 4. 모드 분석 로직 (MVP)
+#    - CIS-10 본격 구현 전에 쓸 수 있는 가벼운 버전
+# ─────────────────────────────────────────
 
-    emo = scores.emotion
-    ins = scores.insight
-    tmr = scores.tomorrow
-    final = scores.final
-
-    # 1) 슬럼프
-    if emo < SLUMP_EMOTION_THRESHOLD and ins < 0:
-        return {
-            "mode": "slump",
-            "label": "슬럼프 모드",
-            "description": (
-                "에너지가 많이 떨어져 있거나, 하고 싶은 마음이 잘 나지 않는 시기일 수 있어요. "
-                "지금은 '해야 하는 나'보다 '있는 그대로의 나'를 허용해 주는 시간이 더 필요할 수 있어요."
-            ),
-        }
-
-    # 2) 과부하
-    if emo < OVERLOAD_EMOTION_THRESHOLD and scores.event < 0 and scores.reason < 0:
-        return {
-            "mode": "overload",
-            "label": "정서적 과부하 모드",
-            "description": (
-                "머리와 마음이 동시에 과부하 상태에 가까운 듯 보여요. "
-                "이럴 땐 할 일을 더 늘리기보다, 부담을 잠깐 내려놓고 숨을 고르는 시간이 아주 중요해요."
-            ),
-        }
-
-    # 3) 성장
-    if ins > GROWTH_INSIGHT_THRESHOLD or tmr > GROWTH_TOMORROW_THRESHOLD:
-        return {
-            "mode": "growth",
-            "label": "성장 모드",
-            "description": (
-                "오늘의 경험을 단순한 사건으로 두지 않고, 나를 이해하고 다음을 준비하는 재료로 삼고 있어요. "
-                "이런 시선 자체가 이미 큰 성장의 신호예요."
-            ),
-        }
-
-    # 4) 루틴 (평범한 일상, 큰 기복 없음)
-    if -0.2 <= scores.emotion <= 0.2 and -0.2 <= final <= 0.2:
-        return {
-            "mode": "routine",
-            "label": "루틴 모드",
-            "description": (
-                "크게 흔들리지 않는 일상을 꾸준히 이어가고 있는 모습이에요. "
-                "이런 평범한 날들이 나중에 돌아보면 튼튼한 바닥이 되어 줄 거예요."
-            ),
-        }
-
-    # 5) 기본값: 안정/중립
-    return {
-        "mode": "stable",
-        "label": "안정 모드",
-        "description": (
-            "극단적인 감정의 파도보다는, 나름의 리듬 속에서 하루를 정리하고 있는 모습이에요. "
-            "이 흐름을 지키는 것만으로도 이미 잘 해내고 있어요."
-        ),
-    }
-
-
-# ================================
-# 6. 외부에서 쓰는 메인 함수들
-# ================================
-
-def analyze_entry(entry: Any) -> Dict[str, Any]:
+def analyze_mode(diary: DiaryLike) -> Dict[str, Any]:
     """
-    SQLAlchemy 모델이든, Pydantic 모델이든
-    emotion/event/reason/insight/tomorrow 속성만 있으면 동작하도록 설계.
+    일기 한 편의 '모드'를 간단히 판정하는 MVP 버전.
+
+    예시 모드:
+    - LIGHT_LOG: 짧은 메모 수준
+    - EMOTION_DUMP: 감정 위주로 쏟아낸 상태
+    - REFLECTION: 이유/인사이트까지 연결된 상태
+    - ACTIONABLE: 내일 한 문장까지 구체적인 행동이 나온 상태
     """
-    emotion = getattr(entry, "emotion", "") or ""
-    event = getattr(entry, "event", "") or ""
-    reason = getattr(entry, "reason", "") or ""
-    insight = getattr(entry, "insight", "") or ""
-    tomorrow = getattr(entry, "tomorrow", "") or ""
 
-    ambiguous = _is_ambiguous(emotion, event, reason, insight, tomorrow)
-    scores = _compute_scores(emotion, event, reason, insight, tomorrow)
-    mode_info = _classify_mode(scores, ambiguous)
+    amb = detect_ambiguity(diary)
 
-    result: Dict[str, Any] = {
-        "mode": mode_info["mode"],
-        "modeLabel": mode_info["label"],
-        "modeDescription": mode_info["description"],
-        "scores": {
-            "emotion": scores.emotion,
-            "event": scores.event,
-            "reason": scores.reason,
-            "insight": scores.insight,
-            "tomorrow": scores.tomorrow,
-            "final": scores.final,
+    emotion_len = _text_len(diary.emotion)
+    event_len = _text_len(diary.event)
+    reason_len = _text_len(diary.reason)
+    insight_len = _text_len(diary.insight)
+    tomorrow_len = _text_len(diary.tomorrow)
+
+    filled_core = sum(1 for v in [emotion_len, event_len, reason_len] if v > 0)
+
+    mode = "LIGHT_LOG"
+    mode_label = "짧은 기록"
+    mode_desc = "간단한 메모 수준의 일기입니다. 감정과 사건을 조금 더 적어 보면 좋아요."
+
+    if amb.is_ambiguous:
+        mode = "AMBIGUOUS"
+        mode_label = "모호한 기록"
+        mode_desc = "내용이 조금 짧거나 핵심 정보가 부족해서, 충분히 정리되지 않은 일기일 수 있어요."
+    else:
+        if filled_core == 1:
+            mode = "EMOTION_DUMP"
+            mode_label = "감정 토로 모드"
+            mode_desc = "감정이 중심인 일기입니다. 무슨 일이 있었는지, 왜 그런 감정이 들었는지도 조금 적어볼까요?"
+        elif filled_core == 2:
+            mode = "REFLECTION"
+            mode_label = "부분 성찰 모드"
+            mode_desc = "감정과 사건/이유가 어느 정도 연결된 상태예요. 인사이트를 한 문장으로 정리해보면 더 좋아요."
+        elif filled_core == 3:
+            if tomorrow_len > 0:
+                mode = "ACTIONABLE"
+                mode_label = "행동 기반 성찰 모드"
+                mode_desc = "오늘의 감정·사건·이유가 잘 연결되고, 내일의 한 문장까지 정리된 일기입니다."
+            else:
+                mode = "REFLECTION_DEEP"
+                mode_label = "깊은 성찰 모드"
+                mode_desc = "감정·사건·이유가 잘 연결된 깊이 있는 일기입니다. 내일의 한 문장을 덧붙이면 더 좋습니다."
+
+    analysis_meta: Dict[str, Any] = {
+        "ambiguity": {
+            "is_ambiguous": amb.is_ambiguous,
+            "score": amb.score,
+            "reasons": amb.reasons,
         },
-        "isAmbiguous": ambiguous,
+        "lengths": {
+            "emotion": emotion_len,
+            "event": event_len,
+            "reason": reason_len,
+            "insight": insight_len,
+            "tomorrow": tomorrow_len,
+            "total": emotion_len + event_len + reason_len + insight_len + tomorrow_len,
+        },
+        "core_filled_count": filled_core,
     }
-    return result
+
+    return {
+        "mode": mode,
+        "mode_label": mode_label,
+        "mode_description": mode_desc,
+        "analysis_meta": analysis_meta,
+    }
 
 
-def generate_coaching(entry: Any, analysis: Dict[str, Any]) -> str:
+# ─────────────────────────────────────────
+# 5. 코칭 메시지 생성 (MVP)
+# ─────────────────────────────────────────
+
+def generate_coaching(
+    diary: DiaryLike,
+    mode: str,
+    mode_label: str,
+    mode_description: str,
+    analysis_meta: Dict[str, Any],
+) -> str:
     """
-    모드 + 점수 기반 코칭 메시지.
-    나중에 톤, 길이, 조건은 여기서만 수정하면 됨.
+    간단한 규칙 기반 코칭 메시지 (MVP).
+    나중에 LLM 기반으로 교체 가능.
     """
-    mode = analysis.get("mode", "stable")
-    is_ambiguous = analysis.get("isAmbiguous", False)
 
-    if is_ambiguous or mode == "ambiguous":
+    amb = analysis_meta.get("ambiguity", {})
+    is_ambiguous = amb.get("is_ambiguous", False)
+
+    if is_ambiguous:
         return (
-            "지금은 마음을 딱 맞는 말로 표현하기가 쉽지 않을 수도 있어요. "
-            "그래도 이렇게 화면을 열고 몇 글자라도 남긴 것 자체가 이미 중요한 한 걸음이에요. "
-            "오늘은 '이런 마음이 있었구나' 하고 가볍게만 인정해 주어도 충분해요."
+            "오늘 기록은 아직 조금 추상적인 부분이 있어 보여요. "
+            "조금만 더 구체적으로, 어떤 일이 있었는지와 그때 어떤 생각이 들었는지를 한두 문장만 덧붙여 볼까요?"
         )
 
-    if mode == "slump":
+    if mode == "EMOTION_DUMP":
         return (
-            "요즘 에너지가 잘 나지 않거나, 사소한 일에도 쉽게 지칠 수 있는 시기일 거예요. "
-            "이럴 때일수록 '이 정도면 이미 많이 하고 있다'는 시선으로 나를 바라봐 주는 게 중요해요. "
-            "내일은 거창한 목표 대신, 물 한 컵 마시기 같은 아주 작은 행동 하나만 나를 위해 챙겨 보면 어떨까요?"
+            "감정을 잘 꺼내 주었어요. 👏 이제 그 감정이 들게 된 구체적인 장면이나 말, "
+            "상황을 한 번만 떠올려 보고, '왜 이렇게 느꼈지?'를 한 문장으로 적어보면 어떨까요?"
         )
 
-    if mode == "overload":
+    if mode.startswith("REFLECTION"):
         return (
-            "지금은 머릿속과 마음이 동시에 과부하에 가까워 보이에요. "
-            "해야 할 일을 한 번에 다 처리하려 하기보다는, 가장 부담이 적은 것 하나만 골라서 줄여 보는 것도 괜찮아요. "
-            "오늘이나 내일 중에 5분이라도 '아무것도 하지 않는 시간'을 자신에게 허락해 줄 수 있을까요?"
+            "오늘을 돌아보는 시선이 잘 느껴지는 기록이에요. ✨ "
+            "여기에서 한 걸음 더 나아가, '내가 배운 점 한 가지'를 짧게 정리해 보면 내일의 나에게 큰 도움이 될 거예요."
         )
 
-    if mode == "growth":
+    if mode == "ACTIONABLE":
         return (
-            "오늘의 경험을 통해 나를 이해하고, 다음을 준비하려는 태도가 잘 느껴져요. "
-            "완벽하게 해내지 못한 순간조차도 다음을 위한 데이터로 바라보는 시선이 참 단단해 보여요. "
-            "내일은 오늘 떠올린 생각들 중 가장 가벼운 것 하나만 골라 10초 정도 실천해 보는 것만으로도 충분해요."
+            "감정과 사건, 이유, 그리고 내일의 한 문장까지 멋지게 정리했어요. 🌱 "
+            "내일 이 문장을 떠올리기 쉽도록, 잠들기 전에 오늘 쓴 문장을 한 번만 다시 읽어보는 건 어떨까요?"
         )
 
-    if mode == "routine":
-        return (
-            "크게 특별한 사건은 없었을지 몰라도, 이런 일상을 기록해 두는 습관이 이미 큰 자산이에요. "
-            "루틴은 눈에 띄는 성취보다 '지금의 나를 지켜 주는 힘'을 길러줘요. "
-            "내일은 기존 루틴에 10초짜리 새로운 시도를 살짝 얹어 보는 정도만 해도 좋아요."
-        )
-
-    if mode == "stable":
-        return (
-            "오늘 하루를 비교적 차분하게 정리해 둔 모습에서, 스스로의 리듬을 잘 지키고 있는 인상이 느껴져요. "
-            "이런 날들이 쌓일수록 감정의 큰 파도에도 덜 휩쓸리게 되는 경우가 많아요. "
-            "내일은 이 안정감을 지켜 줄 수 있는 작은 습관 하나를 다시 한 번 떠올려 보면 좋겠어요."
-        )
-
-    # 예외적으로 모드가 예상 밖일 때
+    # 기본 코칭
     return (
-        "오늘 하루를 이렇게 글로 남겨 둔 것만으로도 이미 큰 수고를 한 거예요. "
-        "지금의 감정을 있는 그대로 인정해 주는 것에서부터 다음 걸음이 시작돼요. "
-        "내일의 나에게 건네고 싶은 한 문장을 마음속으로만 조용히 떠올려 보는 것도 좋은 마무리가 될 거예요."
+        "오늘 이렇게 기록을 남긴 것만으로도 이미 큰 걸음을 내디딘 거예요. "
+        "조금씩, 하지만 꾸준하게 지금의 나를 적어 나가 보아요. 📖"
     )
 
-def analyze_mode(entry: Any) -> Dict[str, Any]:
-    """
-    이전 코드에서 사용하던 이름을 유지하기 위한 래퍼.
-    내부적으로는 analyze_entry를 그대로 호출한다.
-    """
-    return analyze_entry(entry)
 

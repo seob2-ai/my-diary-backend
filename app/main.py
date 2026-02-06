@@ -9,44 +9,49 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request as StarletteRequest
 import traceback
 import logging
-
-from app.database import Base, engine
-from app.routers import diary, summary
-
-# 로깅 설정 (더 상세한 로깅)
 import os
 from logging.handlers import RotatingFileHandler
 
+from app.database import Base, engine
+from app.routers import diary, summary, analytics
+from app.config import settings
+
 # 로그 디렉토리 생성
-log_dir = "logs"
-os.makedirs(log_dir, exist_ok=True)
+os.makedirs(settings.LOG_DIR, exist_ok=True)
+
+# 로그 레벨 설정
+log_level = getattr(logging, settings.LOG_LEVEL.upper(), logging.DEBUG)
 
 # 파일 핸들러 추가 (로그 파일로 저장)
 file_handler = RotatingFileHandler(
-    os.path.join(log_dir, "server.log"),
+    os.path.join(settings.LOG_DIR, "server.log"),
     maxBytes=10*1024*1024,  # 10MB
     backupCount=5,
     encoding='utf-8'
 )
-file_handler.setLevel(logging.DEBUG)
+file_handler.setLevel(log_level)
 file_handler.setFormatter(logging.Formatter(
     '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 ))
 
 # 콘솔 핸들러 추가 (터미널에 출력)
 console_handler = logging.StreamHandler()
-console_handler.setLevel(logging.DEBUG)
+console_handler.setLevel(log_level)
 console_handler.setFormatter(logging.Formatter(
     '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 ))
 
 # 루트 로거 설정
 logging.basicConfig(
-    level=logging.DEBUG,
+    level=log_level,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[file_handler, console_handler]
 )
 logger = logging.getLogger(__name__)
+
+# 설정 로깅
+logger.info(f"환경: {settings.ENVIRONMENT}")
+logger.info(f"CORS 허용 출처: {settings.ALLOWED_ORIGINS}")
 
 
 # ---------------------------
@@ -229,13 +234,13 @@ app.add_middleware(LoggingMiddleware)
 
 
 # ---------------------------
-# 6. CORS 설정
+# 6. CORS 설정 (환경 변수에서 읽음)
 # ---------------------------
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # 개발 단계라 전체 허용
+    allow_origins=settings.ALLOWED_ORIGINS,
     allow_credentials=True,
-    allow_methods=["*"],
+    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     allow_headers=["*"],
 )
 
@@ -245,6 +250,7 @@ app.add_middleware(
 # ---------------------------
 app.include_router(diary.router, prefix="/api")
 app.include_router(summary.router, prefix="/api")
+app.include_router(analytics.router, prefix="/api")
 
 
 # ---------------------------

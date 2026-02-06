@@ -133,12 +133,7 @@ def create_diary(
         # HTTPException은 그대로 전달
         raise
     except Exception as e:
-        # 예상치 못한 모든 예외를 잡아서 로깅하고 HTTPException으로 변환
-        logger.error(f"예상치 못한 오류: {type(e).__name__}: {str(e)}", exc_info=True)
-        raise HTTPException(
-            status_code=500,
-            detail=f"서버 오류가 발생했습니다: {str(e)}"
-        )
+        handle_api_error("일기 생성", e, logger, status_code=500, rollback_db=db)
 
 
 @router.get(
@@ -257,12 +252,7 @@ def update_diary(
     except HTTPException:
         raise
     except Exception as e:
-        db.rollback()
-        logger.error(f"일기 수정 오류: {type(e).__name__}: {str(e)}", exc_info=True)
-        raise HTTPException(
-            status_code=500,
-            detail=f"일기 수정 중 오류가 발생했습니다: {str(e)}"
-        )
+        handle_api_error("일기 수정", e, logger, status_code=500, rollback_db=db)
 
 
 @router.delete(
@@ -297,12 +287,7 @@ def delete_diary(
     except HTTPException:
         raise
     except Exception as e:
-        db.rollback()
-        logger.error(f"일기 삭제 오류: {type(e).__name__}: {str(e)}", exc_info=True)
-        raise HTTPException(
-            status_code=500,
-            detail=f"일기 삭제 중 오류가 발생했습니다: {str(e)}"
-        )
+        handle_api_error("일기 삭제", e, logger, status_code=500, rollback_db=db)
 
 
 @router.get(
@@ -383,11 +368,7 @@ def get_diary_stats(
         return stats
         
     except Exception as e:
-        logger.error(f"통계 조회 오류: {type(e).__name__}: {str(e)}", exc_info=True)
-        raise HTTPException(
-            status_code=500,
-            detail=f"통계 조회 중 오류가 발생했습니다: {str(e)}"
-        )
+        handle_api_error("통계 조회", e, logger, status_code=500)
 
 
 @router.get(
@@ -451,11 +432,7 @@ def search_diaries(
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"검색 오류: {type(e).__name__}: {str(e)}", exc_info=True)
-        raise HTTPException(
-            status_code=500,
-            detail=f"검색 중 오류가 발생했습니다: {str(e)}"
-        )
+        handle_api_error("검색", e, logger, status_code=500)
 
 
 @router.post(
@@ -529,9 +506,5 @@ def preview_diary_analysis(
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"분석 미리보기 오류: {type(e).__name__}: {str(e)}", exc_info=True)
-        raise HTTPException(
-            status_code=500,
-            detail=f"분석 미리보기 중 오류가 발생했습니다: {str(e)}"
-        )
+        handle_api_error("분석 미리보기", e, logger, status_code=500)
 

@@ -83,3 +83,4 @@ python init_db.py
    git commit -m "feat: 검색 API에 coaching 필드 추가 및 DB 초기화 스크립트 추가"
    ```
 
+

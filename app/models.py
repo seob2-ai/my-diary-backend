@@ -9,6 +9,11 @@ def generate_uuid():
     return f"diary_{uuid.uuid4().hex[:8]}"
 
 
+def make_diary_id():
+    """일기용 ID 생성 헬퍼 (기존 generate_uuid 별칭)."""
+    return generate_uuid()
+
+
 class DiaryEntry(Base):
     __tablename__ = "diary_entries"
 
